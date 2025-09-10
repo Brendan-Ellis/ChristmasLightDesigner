@@ -1,0 +1,408 @@
+
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Christmas Light Designer (Electron)</title>
+  <style>
+    :root { --bg:#f8fafc; --panel:#ffffff; --border:#d1d5db; --text:#111827; --muted:#6b7280; --accent:#16a34a; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; color: var(--text); background: var(--bg); }
+    .wrap { display: grid; grid-template-columns: 340px 1fr; height: 100vh; }
+    .panel { background: var(--panel); border-right: 1px solid var(--border); padding: 16px; overflow:auto; }
+    .h { font-weight: 700; margin: 8px 0; }
+    .row { margin: 12px 0; }
+    .sub { font-size: 12px; color: var(--muted); }
+    .btn { display:inline-block; padding:8px 10px; border:1px solid var(--border); background:#fff; border-radius:8px; cursor:pointer; }
+    .btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+    .grid { display:flex; flex-wrap: wrap; gap:8px; }
+    .swatch { width:36px; height:36px; border-radius:8px; border:1px solid #00000022; position:relative; cursor:pointer; }
+    .badge { position:absolute; right:-6px; top:-6px; width:18px; height:18px; border-radius:50%; background:#111; color:#fff; font-size:11px; display:flex; align-items:center; justify-content:center; }
+    .canvas-wrap { display:flex; align-items:center; justify-content:center; height:100vh; }
+    canvas { max-width: 100%; height: auto; background:#fff; border:1px solid var(--border); box-shadow: 0 10px 20px rgba(0,0,0,0.05); cursor: crosshair; touch-action: none; image-rendering: optimizeSpeed; }
+    .toolbar { display:flex; gap:8px; flex-wrap: wrap; }
+    .select { width:100%; padding:8px; border:1px solid var(--border); border-radius:8px; background:#fff; }
+    .row input[type=range] { width: 100%; }
+    .hidden-file { position: absolute; left: -9999px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="panel">
+      <div class="row">
+        <div class="h">1) Upload a Photo</div>
+        <input id="bgUpload" type="file" accept="image/*" />
+        <div class="sub">Large images are auto-resized for speed.</div>
+      </div>
+
+      <div class="row">
+        <div class="h">2) Pick Light Colors (max 3, in order)</div>
+        <div id="swatches" class="grid"></div>
+        <div class="sub">Click in the order you want them to repeat. Click again to remove.</div>
+      </div>
+
+      <div class="row">
+        <div class="h">3) Drawing Mode</div>
+        <div class="toolbar">
+          <button class="btn active" data-mode="straight">Straight</button>
+          <button class="btn" data-mode="curve">Curved</button>
+          <button class="btn" data-mode="shrubs">Shrubs</button>
+        </div>
+        <div class="sub">Click & drag on the photo to draw, release to place bulbs.</div>
+      </div>
+
+      <div class="row">
+        <div class="h">Bulb Size</div>
+        <input id="bulbSize" type="range" min="3" max="40" value="10" />
+        <div><small><span id="bulbSizeVal">10</span> px</small></div>
+      </div>
+
+      <div class="row">
+        <div class="h">Bulb Spacing</div>
+        <input id="bulbSpacing" type="range" min="6" max="80" value="22" />
+        <div><small><span id="bulbSpacingVal">22</span> px</small></div>
+      </div>
+
+      <div class="row">
+        <div class="h">Decorations</div>
+        <select id="decoSelect" class="select">
+          <option value="assets/wreath.png">Wreath</option>
+          <option value="assets/garland.png">Garland</option>
+          <option value="assets/bow.png">Bow</option>
+        </select>
+        <input id="decoUpload" type="file" accept="image/*" class="hidden-file" />
+        <div class="toolbar" style="margin-top:8px;">
+          <button class="btn" id="addDeco">Add Selected</button>
+          <button class="btn" id="uploadDecoBtn">Upload Decoration…</button>
+          <button class="btn" id="copyDeco">Copy</button>
+          <button class="btn" id="pasteDeco">Paste</button>
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="h">Darken Photo</div>
+        <input id="darken" type="range" min="0" max="100" value="0" />
+        <div><small>0 = Day, 100 = Night</small></div>
+      </div>
+
+      <div class="row toolbar">
+        <button class="btn" id="undoBtn">Undo</button>
+        <button class="btn" id="resetBtn">Reset</button>
+        <button class="btn" id="downloadBtn">Download PNG</button>
+      </div>
+    </div>
+
+    <div class="canvas-wrap">
+      <canvas id="c" width="1200" height="800" aria-label="Design canvas"></canvas>
+    </div>
+  </div>
+
+<script>
+(() => {
+  const MAX_DIMENSION = 1920;
+  const MIN_STEP = 4;
+  const PREVIEW_SPACING_MULT = 1.5;
+
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: true });
+  let bgImg = null;
+  let darkness = 0;
+  let mode = 'straight';
+  let drawing = false;
+  let currentPath = [];
+  let paths = [];
+  let undoStack = [];
+  let selectedDecoIndex = -1;
+  let copyBuffer = null;
+
+  let rafPending = false;
+  let needsRedraw = true;
+
+  const bgUpload = document.getElementById('bgUpload');
+  const swatchesWrap = document.getElementById('swatches');
+  const bulbSizeEl = document.getElementById('bulbSize');
+  const bulbSpaceEl = document.getElementById('bulbSpacing');
+  const bulbSizeVal = document.getElementById('bulbSizeVal');
+  const bulbSpaceVal = document.getElementById('bulbSpacingVal');
+  const darkenEl = document.getElementById('darken');
+  const decoSelect = document.getElementById('decoSelect');
+  const decoUpload = document.getElementById('decoUpload');
+  const addDecoBtn = document.getElementById('addDeco');
+  const uploadDecoBtn = document.getElementById('uploadDecoBtn');
+  const copyDecoBtn = document.getElementById('copyDeco');
+  const pasteDecoBtn = document.getElementById('pasteDeco');
+  const undoBtn = document.getElementById('undoBtn');
+  const resetBtn = document.getElementById('resetBtn');
+  const downloadBtn = document.getElementById('downloadBtn');
+
+  const COLOR_OPTIONS = [
+    { id:'warm', hex:'#F6E6C3', label:'Warm White' },
+    { id:'bright', hex:'#FFFFFF', label:'Bright White' },
+    { id:'neutralblue', hex:'#7FB3FF', label:'LED Neutral Blue' },
+    { id:'red', hex:'#E53935', label:'Red' },
+    { id:'green', hex:'#2ECC71', label:'Green' },
+    { id:'darkblue', hex:'#2A4B8D', label:'Dark Blue' },
+    { id:'yellow', hex:'#F2C94C', label:'Yellow' },
+  ];
+  let selectedColors = ['#F6E6C3'];
+  function renderSwatches() {
+    swatchesWrap.innerHTML='';
+    COLOR_OPTIONS.forEach(c => {
+      const b = document.createElement('div');
+      b.className='swatch'; b.style.background=c.hex; b.title=c.label;
+      const idx = selectedColors.indexOf(c.hex);
+      if (idx>=0) { const badge=document.createElement('div'); badge.className='badge'; badge.textContent=idx+1; b.appendChild(badge); }
+      b.addEventListener('click', () => {
+        const i = selectedColors.indexOf(c.hex);
+        if (i>=0) selectedColors = selectedColors.filter(x=>x!==c.hex);
+        else { if (selectedColors.length>=3) selectedColors.shift(); selectedColors.push(c.hex); }
+        renderSwatches(); scheduleRedraw();
+      });
+      swatchesWrap.appendChild(b);
+    });
+  }
+  renderSwatches();
+
+  document.querySelectorAll('[data-mode]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('[data-mode]').forEach(b=>b.classList.remove('active'));
+      btn.classList.add('active');
+      mode = btn.getAttribute('data-mode');
+    });
+  });
+
+  bulbSizeEl.addEventListener('input', () => { bulbSizeVal.textContent = bulbSizeEl.value; scheduleRedraw(); });
+  bulbSpaceEl.addEventListener('input', () => { bulbSpaceVal.textContent = bulbSpaceEl.value; scheduleRedraw(); });
+  darkenEl.addEventListener('input', () => { darkness = parseInt(darkenEl.value,10)||0; scheduleRedraw(); });
+  bulbSizeVal.textContent = bulbSizeEl.value;
+  bulbSpaceVal.textContent = bulbSpaceEl.value;
+
+  bgUpload.addEventListener('change', (e) => {
+    const f = e.target.files[0]; if (!f) return;
+    const url = URL.createObjectURL(f);
+    const img = new Image();
+    img.onload = () => {
+      const {width, height} = fitWithin(img.width, img.height, MAX_DIMENSION);
+      const off = document.createElement('canvas');
+      off.width = width; off.height = height;
+      const octx = off.getContext('2d');
+      octx.imageSmoothingEnabled = true;
+      octx.imageSmoothingQuality = 'high';
+      octx.drawImage(img, 0, 0, width, height);
+
+      const scaled = new Image();
+      scaled.onload = () => {
+        bgImg = scaled;
+        canvas.width = width; canvas.height = height;
+        scheduleRedraw();
+      };
+      scaled.src = off.toDataURL('image/jpeg', 0.92);
+    };
+    img.src = url;
+  });
+
+  function fitWithin(w,h,max) {
+    if (Math.max(w,h) <= max) return {width:w, height:h};
+    const scale = max / Math.max(w,h);
+    return { width: Math.round(w*scale), height: Math.round(h*scale) };
+  }
+
+  addDecoBtn.addEventListener('click', () => { addDecoration(decoSelect.value); });
+  uploadDecoBtn.addEventListener('click', () => { decoUpload.click(); });
+  decoUpload.addEventListener('change', (e) => {
+    const f = e.target.files[0]; if (!f) return;
+    const url = URL.createObjectURL(f);
+    const opt = document.createElement('option');
+    opt.value = url; opt.textContent = f.name;
+    decoSelect.appendChild(opt);
+    decoSelect.value = url;
+    addDecoration(url);
+    e.target.value = '';
+  });
+  copyDecoBtn.addEventListener('click', () => { const d=getSelectedDecoration(); if (d) copyBuffer = serializeDeco(d); });
+  pasteDecoBtn.addEventListener('click', () => {
+    if (!copyBuffer) return;
+    const clone = deserializeDeco(copyBuffer);
+    clone.x += 20; clone.y += 20; clone.id = Date.now();
+    pushHistory(); paths.push(clone); scheduleRedraw();
+  });
+  undoBtn.addEventListener('click', () => { if (!undoStack.length) return; paths = undoStack.pop(); selectedDecoIndex=-1; fixDecoImages(); scheduleRedraw(); });
+  resetBtn.addEventListener('click', () => { pushHistory(); paths=[]; selectedDecoIndex=-1; scheduleRedraw(); });
+  downloadBtn.addEventListener('click', () => { const a=document.createElement('a'); a.href=canvas.toDataURL('image/png'); a.download='christmas-design.png'; a.click(); });
+
+  let isDraggingDeco=false; let dragOffset={x:0,y:0}; let activePointerId=null; let lastPoint=null;
+
+  canvas.addEventListener('pointerdown', (e) => {
+    canvas.setPointerCapture(e.pointerId);
+    activePointerId = e.pointerId;
+    const {x,y} = toCanvasXY(e);
+    const di = hitTestDecoration(x,y);
+    if (di>=0) {
+      selectedDecoIndex = di; isDraggingDeco=true;
+      const d = paths[di]; dragOffset.x = x-d.x; dragOffset.y = y-d.y; scheduleRedraw(); return;
+    } else { selectedDecoIndex = -1; scheduleRedraw(); }
+    drawing = true; currentPath=[{x,y}]; lastPoint = {x,y};
+  });
+
+  canvas.addEventListener('pointermove', (e) => {
+    if (activePointerId !== e.pointerId) return;
+    const {x,y} = toCanvasXY(e);
+    if (isDraggingDeco && selectedDecoIndex>=0) {
+      const d = paths[selectedDecoIndex]; d.x = x - dragOffset.x; d.y = y - dragOffset.y; scheduleRedraw(); return;
+    }
+    if (!drawing) return;
+    if (!lastPoint || dist(lastPoint, {x,y}) >= MIN_STEP) {
+      currentPath.push({x,y});
+      lastPoint = {x,y};
+      scheduleRedraw();
+    }
+  });
+
+  canvas.addEventListener('pointerup', (e) => {
+    if (activePointerId !== e.pointerId) return;
+    canvas.releasePointerCapture(e.pointerId);
+    activePointerId = null;
+    if (isDraggingDeco) { isDraggingDeco=false; return; }
+    if (!drawing) return;
+    drawing=false; lastPoint=null;
+    if (currentPath.length<2) { currentPath=[]; scheduleRedraw(); return; }
+    pushHistory();
+    const pathObj = {
+      id: Date.now(),
+      type:'path',
+      points: currentPath,
+      bulbSize: parseInt(bulbSizeEl.value,10),
+      bulbSpacing: parseInt(bulbSpaceEl.value,10),
+      colors: selectedColors.slice(),
+      mode
+    };
+    computeBulbs(pathObj); paths.push(pathObj); currentPath=[]; scheduleRedraw();
+  });
+
+  canvas.addEventListener('wheel', (e) => {
+    if (selectedDecoIndex>=0) {
+      e.preventDefault();
+      const d = paths[selectedDecoIndex];
+      const factor = (e.deltaY < 0) ? 1.05 : 0.95;
+      d.w *= factor; d.h *= factor; scheduleRedraw();
+    }
+  }, { passive:false });
+
+  function dist(a,b) { const dx=a.x-b.x, dy=a.y-b.y; return Math.hypot(dx,dy); }
+  function toCanvasXY(e) { const r=canvas.getBoundingClientRect(); return { x:e.clientX - r.left, y:e.clientY - r.top }; }
+  function hitTestDecoration(x,y) {
+    for (let i=paths.length-1;i>=0;i--) { const p=paths[i]; if (p.type!=='deco') continue; if (x>=p.x&&x<=p.x+p.w&&y>=p.y&&y<=p.y+p.h) return i; }
+    return -1;
+  }
+  function addDecoration(file) {
+    const img = new Image();
+    img.onload = () => {
+      const w = Math.min(200, img.width || 200);
+      const h = img.height ? img.height * (w/(img.width||200)) : w;
+      pushHistory();
+      paths.push({ id: Date.now(), type:'deco', src:file, img, x:(canvas.width-w)/2, y:(canvas.height-h)/2, w, h });
+      selectedDecoIndex = paths.length - 1; scheduleRedraw();
+    };
+    img.src = file;
+  }
+  function getSelectedDecoration() { const p=paths[selectedDecoIndex]; return (p && p.type==='deco') ? p : null; }
+  function serializeDeco(d) { return { type:'deco', src:d.src, x:d.x, y:d.y, w:d.w, h:d.h }; }
+  function deserializeDeco(obj) { const img=new Image(); img.src=obj.src; return { id:Date.now(), type:'deco', src:obj.src, img, x:obj.x, y:obj.y, w:obj.w, h:obj.h }; }
+  function fixDecoImages() { for (const p of paths) if (p.type==='deco' && !p.img) { const im=new Image(); im.src=p.src; p.img=im; } }
+
+  function pushHistory() {
+    const serial = paths.map(p => p.type==='deco' ? serializeDeco(p) : { ...p });
+    undoStack.push(serial);
+    if (undoStack.length>50) undoStack.shift();
+  }
+
+  function computeBulbs(pathObj, preview=false) {
+    const pts = pathObj.points; if (pts.length<2) { pathObj.bulbs=[]; return; }
+    const spacingBase = Math.max(6, pathObj.bulbSpacing);
+    const spacing = preview ? Math.max(6, Math.round(spacingBase * PREVIEW_SPACING_MULT)) : spacingBase;
+    let distSince=0, colorIdx=0; const bulbs=[];
+    for (let i=0;i<pts.length-1;i++) {
+      const a=pts[i], b=pts[i+1]; const dx=b.x-a.x, dy=b.y-a.y; const segLen=Math.hypot(dx,dy); let t=0;
+      while (t<=segLen) {
+        if (distSince<=0) {
+          const ratio = segLen ? (t/segLen) : 0;
+          const bx=a.x+dx*ratio, by=a.y+dy*ratio;
+          const color = pathObj.colors.length ? pathObj.colors[colorIdx % pathObj.colors.length] : '#fff';
+          bulbs.push({x:bx,y:by,color}); colorIdx++; distSince=spacing;
+        }
+        const step = Math.min(distSince, segLen - t); t += step; distSince -= step;
+      }
+    }
+    if (pathObj.mode==='shrubs') { for (const b of bulbs) { b.x += (Math.random()-0.5)*spacing*0.3; b.y += (Math.random()-0.5)*spacing*0.3; } }
+    pathObj.bulbs = bulbs;
+  }
+
+  function scheduleRedraw() {
+    needsRedraw = true;
+    if (!rafPending) {
+      rafPending = true;
+      requestAnimationFrame(() => {
+        rafPending = false;
+        if (needsRedraw) { needsRedraw = false; redraw(); }
+      });
+    }
+  }
+
+  function redraw() {
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+    if (bgImg) {
+      ctx.drawImage(bgImg,0,0,canvas.width,canvas.height);
+      if (darkness>0) { ctx.fillStyle = `rgba(0,0,0,${Math.min(0.9, darkness/100)})`; ctx.fillRect(0,0,canvas.width,canvas.height); }
+    } else { ctx.fillStyle='#fff'; ctx.fillRect(0,0,canvas.width,canvas.height); }
+
+    for (const p of paths) {
+      if (p.type==='path') drawPath(p);
+      else if (p.type==='deco') {
+        if (!p.img) { const im=new Image(); im.src=p.src; p.img=im; }
+        ctx.drawImage(p.img, p.x, p.y, p.w, p.h);
+        if (paths.indexOf(p)===selectedDecoIndex) { ctx.strokeStyle='#16a34a'; ctx.setLineDash([6,4]); ctx.lineWidth=2; ctx.strokeRect(p.x,p.y,p.w,p.h); ctx.setLineDash([]); }
+      }
+    }
+
+    if (drawing && currentPath.length>1) {
+      ctx.save();
+      ctx.lineWidth = Math.max(1, parseInt(bulbSizeEl.value,10)/3);
+      ctx.strokeStyle = 'rgba(0,0,0,0.3)';
+      if (mode==='curve') ctx.setLineDash([2,2]);
+      ctx.beginPath();
+      currentPath.forEach((pt,i)=> i?ctx.lineTo(pt.x,pt.y):ctx.moveTo(pt.x,pt.y));
+      ctx.stroke();
+      ctx.restore();
+
+      const tmp = { points: currentPath, bulbSize: parseInt(bulbSizeEl.value,10), bulbSpacing: parseInt(bulbSpaceEl.value,10), colors: selectedColors, mode };
+      computeBulbs(tmp, true);
+      for (const b of tmp.bulbs) drawBulb(b.x,b.y,tmp.bulbSize,b.color,0.6);
+    }
+  }
+
+  function drawPath(p) {
+    ctx.save();
+    ctx.lineWidth = Math.max(1, p.bulbSize/3);
+    ctx.strokeStyle = 'rgba(0,0,0,0.25)';
+    if (p.mode==='curve') ctx.setLineDash([2,2]);
+    ctx.beginPath(); p.points.forEach((pt,i)=> i?ctx.lineTo(pt.x,pt.y):ctx.moveTo(pt.x,pt.y)); ctx.stroke(); ctx.restore();
+    for (const b of p.bulbs) drawBulb(b.x,b.y,p.bulbSize,b.color,1);
+  }
+
+  function drawBulb(x,y,size,color,alpha=1) {
+    ctx.save();
+    const g = ctx.createRadialGradient(x,y,0, x,y,size*2);
+    g.addColorStop(0, color); g.addColorStop(0.6, color + "80"); g.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.globalAlpha = 0.6*alpha; ctx.fillStyle = g; ctx.fillRect(x-size*2, y-size*2, size*4, size*4);
+    ctx.globalAlpha = alpha;
+    ctx.beginPath(); ctx.fillStyle = color; ctx.arc(x,y,size,0,Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.fillStyle = "rgba(255,255,255,0.6)"; ctx.arc(x - size/3, y - size/3, Math.max(1,size/4), 0, Math.PI*2); ctx.fill();
+    ctx.restore();
+  }
+
+  scheduleRedraw();
+})();
+</script>
+</body>
+</html>
